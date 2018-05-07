@@ -878,6 +878,59 @@ func TestFlushOnClose(t *testing.T) {
 	}
 }
 
+func TestFormatMulti(t *testing.T) {
+	c := &Client{
+		Tags: []string{"ten:charrs", "ten:chars"},
+	}
+
+	t.Run("no tags", func(t *testing.T) {
+		const m1 = `my.great.metric:100.000000,200.000000,300.000000|d|#ten:charrs,ten:chars`
+
+		msgs := c.formatMulti("my.great.metric", []float64{100.0, 200.0, 300.0}, distributionSuffix, nil, 1)
+		for _, msg := range msgs {
+			if msg != m1 {
+				t.Error(msg)
+			}
+		}
+	})
+
+	t.Run("with tags", func(t *testing.T) {
+		const m2 = `my.great.metric:100.000000,200.000000,300.000000|d|#ten:charrs,ten:chars,custom:1,custom2:2`
+
+		tags := []string{"custom:1", "custom2:2"}
+		msgs := c.formatMulti("my.great.metric", []float64{100.0, 200.0, 300.0}, distributionSuffix, tags, 1)
+		for _, msg := range msgs {
+			if msg != m2 {
+				t.Error(msg)
+			}
+		}
+	})
+
+	t.Run("requiring split", func(t *testing.T) {
+		metric := "123456789"
+
+		// 19 char tag (20 with comma prepended)
+		tags := []string{"customtag:customvalue"}
+
+		// Lots of values
+		var values []float64
+		for i := float64(0); i < 200; i++ {
+			values = append(values, i)
+		}
+
+		msgs := c.formatMulti(metric, values, distributionSuffix, tags, 1)
+		for _, msg := range msgs {
+			if len(msg) > OptimalPayloadSize {
+				t.Error("msg too large", len(msg), msg)
+			}
+		}
+
+		if len(msgs) <= 1 {
+			t.Error("expected more than one message", len(msgs))
+		}
+	})
+}
+
 // These benchmarks show that using different format options:
 // v1: sprintf-ing together a bunch of intermediate strings is 4-5x faster
 // v2: some use of buffer

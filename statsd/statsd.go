@@ -176,6 +176,91 @@ func (c *Client) format(name string, value interface{}, suffix []byte, tags []st
 	return buf.String()
 }
 
+func (c *Client) formatMulti(name string, value interface{}, suffix []byte, tags []string, rate float64) []string {
+	suffixLen := len(suffix) + tagStringLength(c.Tags, tags)
+
+	// Account for the variable-length rate but only format it once
+	var fmtRate string
+	if rate < 1 {
+		suffixLen += 2
+		fmtRate = strconv.FormatFloat(rate, 'f', -1, 64)
+		suffixLen += len(fmtRate)
+	}
+
+	var formatted []string
+
+appendvalues:
+	for {
+		var buf bytes.Buffer
+		if c.Namespace != "" {
+			buf.WriteString(c.Namespace)
+		}
+
+		buf.WriteString(name)
+		buf.WriteString(":")
+
+		switch val := value.(type) {
+		case []int64:
+			// No more values
+			if len(val) == 0 {
+				break appendvalues
+			}
+
+			for i, iv := range val {
+				fiv := strconv.AppendInt([]byte{}, iv, 10)
+				if buf.Len()+1+len(fiv)+suffixLen > OptimalPayloadSize {
+					// Too large, set value to remaining values, including the current value
+					value = val[i:]
+					break
+				}
+
+				if i > 0 {
+					buf.WriteByte(',')
+				}
+
+				buf.Write(fiv)
+				value = val[i+1:]
+			}
+
+		case []float64:
+			// No more values
+			if len(val) == 0 {
+				break appendvalues
+			}
+
+			for i, fv := range val {
+				ffv := strconv.AppendFloat([]byte{}, fv, 'f', 6, 64)
+				if buf.Len()+1+len(ffv)+suffixLen > OptimalPayloadSize {
+					// Too large, set value to remaining values, including the current value
+					value = val[i:]
+					break
+				}
+
+				if i > 0 {
+					buf.WriteByte(',')
+				}
+
+				buf.Write(ffv)
+				value = val[i+1:]
+			}
+		}
+
+		buf.Write(suffix)
+
+		if rate < 1 {
+			buf.WriteString(`|@`)
+			buf.WriteString(fmtRate)
+		}
+
+		writeTagString(&buf, c.Tags, tags)
+
+		formatted = append(formatted, buf.String())
+		buf.Reset()
+	}
+
+	return formatted
+}
+
 // SetWriteTimeout allows the user to set a custom UDS write timeout. Not supported for UDP.
 func (c *Client) SetWriteTimeout(d time.Duration) error {
 	if c == nil {
@@ -329,6 +414,26 @@ func (c *Client) send(name string, value interface{}, suffix []byte, tags []stri
 	return c.sendMsg(data)
 }
 
+func (c *Client) sendMulti(name string, values interface{}, suffix []byte, tags []string, rate float64) error {
+	var me multiError
+	if c == nil {
+		return nil
+	}
+
+	datas := c.formatMulti(name, values, suffix, tags, rate)
+	for _, d := range datas {
+		if err := c.sendMsg(d); err != nil {
+			me = append(me, err)
+		}
+	}
+
+	if len(me) > 0 {
+		return me
+	}
+
+	return nil
+}
+
 // Gauge measures the value of a metric at a particular time.
 func (c *Client) Gauge(name string, value float64, tags []string, rate float64) error {
 	return c.send(name, value, gaugeSuffix, tags, rate)
@@ -347,6 +452,11 @@ func (c *Client) Histogram(name string, value float64, tags []string, rate float
 // Distribution tracks the statistical distribution of a set of values across your infrastructure.
 func (c *Client) Distribution(name string, value float64, tags []string, rate float64) error {
 	return c.send(name, value, distributionSuffix, tags, rate)
+}
+
+// Distributions tracks the statistical distribution of a set of values across your infrastructure.
+func (c *Client) Distributions(name string, values []float64, tags []string, rate float64) error {
+	return c.sendMulti(name, values, distributionSuffix, tags, rate)
 }
 
 // Decr is just Count of -1
@@ -677,4 +787,42 @@ func writeTagString(w io.Writer, tagList1, tagList2 []string) {
 		io.WriteString(w, ",")
 		io.WriteString(w, removeNewlines(tag))
 	}
+}
+
+func tagStringLength(tagList1, tagList2 []string) int {
+	var length int
+	for _, t := range tagList1 {
+		if length > 0 {
+			// comma
+			length++
+		}
+		length += len(t)
+	}
+
+	for _, t := range tagList2 {
+		if length > 0 {
+			length++
+		}
+		length += len(t)
+	}
+
+	if length == 0 {
+		return 0
+	}
+
+	// Account for the |#
+	return length + 2
+}
+
+type multiError []error
+
+func (me multiError) Error() string {
+	var msg string
+	for i, e := range me {
+		if i != 0 {
+			msg += ":"
+		}
+		msg += e.Error()
+	}
+	return msg
 }
